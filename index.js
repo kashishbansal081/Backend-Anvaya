@@ -1,3 +1,4 @@
+require("dotenv").config();
 const mongoose = require("mongoose");
 const dbConnect = require("./db/db.connect");
 const express = require("express");
@@ -5,8 +6,13 @@ const Lead = require("./models/Leads.model");
 const SalesAgent = require("./models/SalesAgent.model");
 const Comment = require("./models/Comment.model");
 const Tags = require("./models/Tags.model");
+const User = require("./models/User.model");
 const cors = require("cors");
 const app = express();
+const bcrypt = require("bcrypt");
+const saltRounds = 10;
+const jwt = require('jsonwebtoken')
+
 
 app.use(cors());
 
@@ -66,6 +72,30 @@ async function getLeadById(id) {
   }
 }
 
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).json({
+      message: "Token missing",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    req.user = decoded;
+
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      message: "Invalid token",
+    });
+  }
+};
+
 // Lead Api's
 
 app.post("/v1/leads", async (req, res) => {
@@ -82,7 +112,7 @@ app.post("/v1/leads", async (req, res) => {
     if (!source || !validSources.includes(source)) {
       return res.status(400).json({
         error: `Invalid input: 'source' is required and must be one of ${JSON.stringify(
-          validSources
+          validSources,
         )}.`,
       });
     }
@@ -106,7 +136,7 @@ app.post("/v1/leads", async (req, res) => {
     if (!priority || !validPriorities.includes(priority)) {
       return res.status(400).json({
         error: `Invalid input: 'priority' is required and must be one of ${JSON.stringify(
-          validPriorities
+          validPriorities,
         )}.`,
       });
     }
@@ -216,7 +246,8 @@ app.put("/v1/leads/:id", async (req, res) => {
       return res.status(404).json({ error: "Lead not found" });
     }
 
-    const { name, source, salesAgent, status, timeToClose, priority } = req.body;
+    const { name, source, salesAgent, status, timeToClose, priority } =
+      req.body;
 
     if (name !== undefined && !name) {
       return res.status(400).json({ error: "'name' cannot be empty" });
@@ -255,20 +286,16 @@ app.put("/v1/leads/:id", async (req, res) => {
       }
     }
 
-    const updatedLead = await Lead.findByIdAndUpdate(
-      leadId,
-      req.body,
-      { new: true }
-    ).populate("salesAgent", "name");
+    const updatedLead = await Lead.findByIdAndUpdate(leadId, req.body, {
+      new: true,
+    }).populate("salesAgent", "name");
 
     return res.status(200).json(updatedLead);
-
   } catch (error) {
     console.error("Error updating lead:", error);
     return res.status(500).json({ error: "Server error" });
   }
 });
-
 
 app.delete("/v1/leads/:id", async (req, res) => {
   try {
@@ -322,7 +349,7 @@ app.get("/v1/agents", async (req, res) => {
   }
 });
 
-app.delete('/v1/agents/:id', async (req, res)=>{
+app.delete("/v1/agents/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -334,13 +361,8 @@ app.delete('/v1/agents/:id', async (req, res)=>{
       });
     }
 
-    await Lead.updateMany(
-      { salesAgent: id },
-      { $set: { salesAgent: null } }
-    );
-    +
-
-    await SalesAgent.findByIdAndDelete(id);
+    await Lead.updateMany({ salesAgent: id }, { $set: { salesAgent: null } });
+    +(await SalesAgent.findByIdAndDelete(id));
 
     res.status(200).json({
       message: "Sales agent deleted successfully",
@@ -350,8 +372,7 @@ app.delete('/v1/agents/:id', async (req, res)=>{
       error: "Failed to delete sales agent",
     });
   }
-})
-
+});
 
 // Comment Api's
 
@@ -391,7 +412,7 @@ app.get("/v1/leads/:id/comments", async (req, res) => {
     if (isLeadIdValid) {
       let comments = await Comment.find({ lead: id }).populate(
         "author",
-        "name -_id"
+        "name -_id",
       );
 
       res.json(comments);
@@ -439,8 +460,81 @@ app.get("/v1/tags", async (req, res) => {
   }
 });
 
+// Register user
+
+app.post("/v1/api/auth/signup", async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    if (!email || !password) {
+     return  res.status(400).json({ message: "Email and password is required" });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (user) {
+      return res.json({ message: "User already exist!" });
+    }
+
+    const securePassword = await bcrypt.hash(password, saltRounds);
+
+    const newUser = new User({ email, password: securePassword });
+    await newUser.save();
+
+    return res.status(201).json({ message: "User registered successfully." });
+  } catch (error) {
+    res.status(500).json({ message: error });
+  }
+});
+
+app.post("/v1/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const isPasswordMatched = await bcrypt.compare(password, user.password);
+
+    if (!isPasswordMatched) {
+      return res.status(401).json({
+        message: "Invalid credentials",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        userId: user._id,
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d",
+      },
+    );
+
+    return res.status(200).json({
+      message: "Login successful",
+      token,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: error.message,
+    });
+  }
+});
 // Port
 
-app.listen(3000, () => {
-  console.log("running on port 3000");
+app.listen(4000, () => {
+  console.log("running on port 4000");
 });
